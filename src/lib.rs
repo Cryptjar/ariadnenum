@@ -18,12 +18,10 @@ fn parse_label(input: ParseStream) -> syn::Result<(LitStr, Vec<Expr>)> {
     Ok((fmt, args))
 }
 
-fn parse_report_config(input: ParseStream) -> syn::Result<(proc_macro2::TokenStream, proc_macro2::TokenStream, proc_macro2::TokenStream)> {
-    let mut return_tuple = (
-        quote! { Some(ariadne::ReportKind::Error) },
-        quote! { None },
-        quote! { None }
-    );
+fn parse_report_config(input: ParseStream) -> syn::Result<proc_macro2::TokenStream> {
+    let mut kind = quote! { ariadne::ReportKind::Error };
+    let mut config = quote! { None };
+    let mut code = quote! { None };
 
     loop {
         let key = input.parse();
@@ -33,23 +31,21 @@ fn parse_report_config(input: ParseStream) -> syn::Result<(proc_macro2::TokenStr
         let key: Ident = key.unwrap();
         input.parse::<syn::Token![=]>()?;
         let value: Expr = input.parse()?;
-    
+
         if key == "kind" {
-            return_tuple.0 = quote! { Some(#value) };
-        }
-        else if key == "config" {
-            return_tuple.1 = quote! { Some(#value) };
-        }
-        else if key == "code" {
-            return_tuple.2 = quote! { Some(#value) };
+            kind = quote! { #value };
+        } else if key == "config" {
+            config = quote! { Some(#value) };
+        } else if key == "code" {
+            code = quote! { Some(#value) };
         }
 
         if input.parse::<syn::Token![,]>().is_err() {
-            break
+            break;
         }
     }
 
-    Ok(return_tuple)
+    Ok(quote! { (#kind, #config, #code) })
 }
 
 #[proc_macro_derive(Ariadnenum, attributes(message, note, here, label, report, colored))]
@@ -183,127 +179,116 @@ pub fn derive_ariadnenum(input: TokenStream) -> TokenStream {
     };
 
     let match_report = {
-        let arms = enum_data.variants.iter().filter_map(|variant| {
+        let arms = enum_data.variants.iter().map(|variant| {
             let variant_ident = variant.ident.clone();
+
+            let mut report_tuple = quote! { (ariadne::ReportKind::Error, None, None) };
+
             for attr in &variant.attrs {
                 if !attr.path().is_ident("report") {
                     continue;
                 }
-                
-                let expr = attr.parse_args_with(parse_report_config);
-                if let Ok((kind, config, code)) = expr {
-                    return Some(
-                        (
-                            match &variant.fields {
-                                syn::Fields::Named(_) => quote! {
-                                    #enum_name :: #variant_ident { .. } => #kind
-                                },
-                                syn::Fields::Unnamed(_) => quote! {
-                                    #enum_name :: #variant_ident ( .. ) => #kind
-                                },
-                                syn::Fields::Unit => quote! {
-                                    #enum_name :: #variant_ident => #kind
-                                }
-                            },
-                            match &variant.fields {
-                                syn::Fields::Named(_) => quote! {
-                                    #enum_name :: #variant_ident { .. } => #config
-                                },
-                                syn::Fields::Unnamed(_) => quote! {
-                                    #enum_name :: #variant_ident ( .. ) => #config
-                                },
-                                syn::Fields::Unit => quote! {
-                                    #enum_name :: #variant_ident => #config
-                                }
-                            },
-                            match &variant.fields {
-                                syn::Fields::Named(_) => quote! {
-                                    #enum_name :: #variant_ident { .. } => #code
-                                },
-                                syn::Fields::Unnamed(_) => quote! {
-                                    #enum_name :: #variant_ident ( .. ) => #code
-                                },
-                                syn::Fields::Unit => quote! {
-                                    #enum_name :: #variant_ident => #code
-                                }
-                            },
-                        )
-                    );
-                }
+
+                report_tuple = attr.parse_args_with(parse_report_config)?;
             }
-            None
+
+            Ok(match &variant.fields {
+                syn::Fields::Named(_) => quote! {
+                    Self :: #variant_ident { .. } => #report_tuple
+                },
+                syn::Fields::Unnamed(_) => quote! {
+                    Self :: #variant_ident ( .. ) => #report_tuple
+                },
+                syn::Fields::Unit => quote! {
+                    Self :: #variant_ident => #report_tuple
+                },
+            })
         });
 
-        let kinds = arms.clone().map(|t| t.0);
-        let configs = arms.clone().map(|t| t.1);
-        let codes = arms.map(|t| t.2);
+        let arms: Result<Vec<_>, syn::Error> = arms.collect();
+        let arms = match arms {
+            Ok(arms) => arms,
+            Err(e) => return e.to_compile_error().into(),
+        };
 
         quote! {
-            pub fn kind(&self) -> Option<ariadne::ReportKind> {
+            pub fn report_tuple(&self) -> (
+                ariadne::ReportKind<'static>,
+                Option<ariadne::Config>,
+                Option<usize>
+            ) {
                 match self {
-                    #(#kinds,)*
-                    _ => Some(ariadne::ReportKind::Error)
-                }
-            }
-            
-            pub fn config(&self) -> Option<ariadne::Config> {
-                match self {
-                    #(#configs,)*
-                    _ => None
-                }
-            }
-            
-            pub fn code(&self) -> Option<usize> {
-                match self {
-                    #(#codes,)*
-                    _ => None
+                    #(#arms,)*
                 }
             }
         }
     };
 
     let match_error_location = {
-        let arms = enum_data.variants.iter().filter_map(|variant| {
+        let arms = enum_data.variants.iter().map(|variant| {
             let variant_ident = variant.ident.clone();
             match &variant.fields {
                 syn::Fields::Named(fields) => {
                     for field in &fields.named {
                         if has_attr(&field.attrs, "here") {
                             let arg = field.ident.clone().unwrap();
-                            return Some(quote! {
-                                #enum_name :: #variant_ident { #arg, .. } => Some(#arg.clone()),
+                            return Ok(quote! {
+                                Self :: #variant_ident { #arg, .. } => {
+                                    // Type check that gets shows on the field
+                                    let r : &std::ops::Range<usize> = #arg;
+                                    r.clone()
+                                },
                             });
                         }
                     }
-                    return None;
-                },
+                }
                 syn::Fields::Unnamed(fields) => {
-                    let mut patterns = Vec::new();
-                    let mut found = false;
-                    for field in fields.unnamed.iter() {
-                        if !found && has_attr(&field.attrs, "here") {
-                            patterns.push(quote! { span, });
-                            found = true;
-                        } else {
-                            patterns.push(quote! { _, });
-                        };
-                    };
-                    if found {
-                        Some(quote! {
-                            #enum_name :: #variant_ident ( #(#patterns)* ) => Some(span.clone()),
+                    let mut found = 0;
+                    let patterns = fields
+                        .unnamed
+                        .iter()
+                        .map(|f| {
+                            if has_attr(&f.attrs, "here") {
+                                found += 1;
+                                quote! { span, }
+                            } else {
+                                quote! { _, }
+                            }
                         })
-                    } else {
-                        None
+                        .collect::<Vec<_>>();
+
+                    if found == 1 {
+                        return Ok(quote! {
+                            Self :: #variant_ident ( #(#patterns)* ) => {
+                                let r : &std::ops::Range<usize> = span;
+                                r.clone()
+                            },
+                        });
+                    } else if found > 1 {
+                        return Err(syn::Error::new_spanned(
+                            variant_ident,
+                            "Multiple #[here] attributes found in this variant",
+                        ));
                     }
-                },
-                syn::Fields::Unit => None,
+                }
+                syn::Fields::Unit => (),
             }
+
+            Err(syn::Error::new_spanned(
+                variant_ident,
+                "Missing error location via the #[here] attribute",
+            ))
         });
+
+        let arms: Result<Vec<_>, _> = arms.collect();
+        let arms = match arms {
+            Ok(arms) => arms,
+            Err(e) => return e.to_compile_error().into(),
+        };
 
         quote! {
             match self {
                 #(#arms)*
-                _ => None
             }
         }
     };
@@ -388,14 +373,14 @@ pub fn derive_ariadnenum(input: TokenStream) -> TokenStream {
         impl #impl_generics #enum_name #ty_generics #where_clause {
             #match_report
 
-            pub fn error_location(&self) -> Option<std::ops::Range<usize>> {
+            pub fn error_location(&self) -> std::ops::Range<usize> {
                 #match_error_location
             }
 
             pub fn message(&self) -> Option<String> {
                 #match_error_message
             }
-            
+
             pub fn note(&self) -> Option<String> {
                 #match_note
             }
@@ -406,21 +391,26 @@ pub fn derive_ariadnenum(input: TokenStream) -> TokenStream {
             }
 
             pub fn eprint_report(&self, filename: &str, source: ariadne::Source) -> Result<(), std::io::Error> {
-                if self.error_location().is_none() || self.message().is_none() {
-                    return Err((std::io::Error::new(std::io::ErrorKind::Other, "Missing location or message")));
-                }
+                self.report_builder(filename).finish().eprint((filename, source))
+            }
+
+            pub fn report_builder<'a>(&self, filename: &'a str) -> ariadne::ReportBuilder<'static, (&'a str, std::ops::Range<usize>)> {
+                let (kind, config, code) = self.report_tuple();
 
                 let mut builder = ariadne::Report::build(
-                    self.kind().unwrap(),
-                    (filename, self.error_location().unwrap())
-                )
-                .with_message(self.message().unwrap());
-                
-                if let Some(code) = self.code() {
+                    kind,
+                    (filename, self.error_location())
+                );
+
+                if let Some(msg) = self.message() {
+                    builder = builder.with_message(msg);
+                }
+
+                if let Some(code) = code {
                     builder = builder.with_code(code);
                 }
 
-                if let Some(config) = self.config() {
+                if let Some(config) = config {
                     builder = builder.with_config(config);
                 }
 
@@ -433,10 +423,10 @@ pub fn derive_ariadnenum(input: TokenStream) -> TokenStream {
                 }
 
                 if let Some(note) = self.note() {
-                    builder = builder.with_note(self.note().unwrap());
+                    builder = builder.with_note(note);
                 }
 
-                builder.finish().eprint((filename, source))
+                builder
             }
         }
     }
