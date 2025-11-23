@@ -117,7 +117,7 @@ pub fn derive_ariadnenum(input: TokenStream) -> TokenStream {
         });
 
         quote! {
-            #[allow(unused)]
+            #[allow(unused_variables, unused_assignments)]
             match self {
                 #(#arms,)*
                 _ => None
@@ -174,7 +174,7 @@ pub fn derive_ariadnenum(input: TokenStream) -> TokenStream {
         });
 
         quote! {
-            #[allow(unused)]
+            #[allow(unused_variables, unused_assignments)]
             match self {
                 #(#arms,)*
                 _ => None
@@ -375,6 +375,7 @@ pub fn derive_ariadnenum(input: TokenStream) -> TokenStream {
         });
 
         quote! {
+            #[allow(unused_variables, unused_assignments)]
             match self {
                 #(#arms,)*
                 _ => Vec::new()
